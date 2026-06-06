@@ -1,111 +1,57 @@
-name: Issue Analyzer
+name: Claude Issue Formatter
 
 on:
   issues:
     types: [opened, edited]
 
 jobs:
-  analyze-issue:
+  format-issue:
     runs-on: ubuntu-latest
     permissions:
-      issues: write
       contents: read
-
+      issues: write
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Analyze issue with Claude
-        id: analyze
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          # Create analysis prompt
-          PROMPT="Analiza este issue de GitHub y proporciona:
-          1. Labels sugeridos (elige entre: bug, enhancement, documentation, question, good first issue, help wanted, performance, security, ui/ux)
-          2. Diagnóstico técnico del problema
-          3. Áreas del código que probablemente necesitan modificación
-          4. Pasos sugeridos para implementar la solución
+      - name: Format issue with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--allowedTools Bash(gh issue *)"
+          prompt: |
+            You are a GitHub issue formatter for a Tetris game project (vanilla JS/HTML/CSS, no dependencies).
 
-          Issue Title: ${ISSUE_TITLE}
+            An issue was just ${{ github.event.action }} with the following details:
+            - Issue number: #${{ github.event.issue.number }}
+            - Title: ${{ github.event.issue.title }}
+            - Body: ${{ github.event.issue.body }}
+            - Author: ${{ github.event.issue.user.login }}
 
-          Issue Body:
-          ${ISSUE_BODY}
+            Your tasks:
+            1. **Add labels** based on the issue content. Use only these labels:
+               - `bug` — something is broken or behaving incorrectly
+               - `enhancement` — new feature or improvement request
+               - `question` — asking for help or clarification
+               - `documentation` — docs need updating
+               - `good first issue` — simple, beginner-friendly task
+               - `duplicate` — if it seems like a known/repeated problem
 
-          Formato de respuesta (JSON):
-          {
-            \"labels\": [\"label1\", \"label2\"],
-            \"diagnostico\": \"Descripción detallada del problema...\",
-            \"areas_codigo\": [\"archivo1.ts\", \"directorio/archivo2.tsx\"],
-            \"pasos_solucion\": [\"paso 1\", \"paso 2\"]
-          }"
+            2. **Post a comment** on the issue that includes:
+               - A brief, friendly summary of what the issue is about (1-2 sentences)
+               - A "Formatted Report" section with:
+                 - **Type**: Bug / Feature Request / Question / Other
+                 - **Summary**: one clear sentence describing the problem or request
+                 - **Steps to reproduce** (for bugs): list them if not provided, ask the user to provide them if it's a bug
+                 - **Expected behavior** (for bugs): what should happen
+                 - **Suggested labels**: the labels you applied and why
+               - A closing note thanking the contributor
 
-          # Call Claude API
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "content-type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-sonnet-4-20250514\",
-              \"max_tokens\": 2000,
-              \"messages\": [{
-                \"role\": \"user\",
-                \"content\": $(echo "$PROMPT" | jq -Rs .)
-              }]
-            }")
+            Use the `gh` CLI to apply labels and post the comment. Example commands:
+              gh issue edit ${{ github.event.issue.number }} --add-label "bug" --repo ${{ github.repository }}
+              gh issue comment ${{ github.event.issue.number }} --body "..." --repo ${{ github.repository }}
 
-          # Extract content from response
-          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-
-          # Parse JSON from Claude response
-          LABELS=$(echo "$CONTENT" | jq -r '.labels | join(",")')
-          DIAGNOSTICO=$(echo "$CONTENT" | jq -r '.diagnostico')
-          AREAS=$(echo "$CONTENT" | jq -r '.areas_codigo | join(", ")')
-          PASOS=$(echo "$CONTENT" | jq -r '.pasos_solucion | map("- " + .) | join("\n")')
-
-          # Output for next steps
-          echo "labels=$LABELS" >> $GITHUB_OUTPUT
-          echo "diagnostico<<EOF" >> $GITHUB_OUTPUT
-          echo "$DIAGNOSTICO" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "areas<<EOF" >> $GITHUB_OUTPUT
-          echo "$AREAS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "pasos<<EOF" >> $GITHUB_OUTPUT
-          echo "$PASOS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Add labels to issue
-        if: steps.analyze.outputs.labels != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          IFS=',' read -ra LABEL_ARRAY <<< "${{ steps.analyze.outputs.labels }}"
-          for label in "${LABEL_ARRAY[@]}"; do
-            gh label create "$label" --force --repo ${{ github.repository }} || true
-            gh issue edit ${{ github.event.issue.number }} --add-label "$label" --repo ${{ github.repository }}
-          done
-
-      - name: Post diagnostic comment
-        if: steps.analyze.outputs.diagnostico != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          COMMENT="## 🤖 Análisis Automático con Claude
-
-          ### 📋 Diagnóstico
-          ${{ steps.analyze.outputs.diagnostico }}
-
-          ### 📁 Áreas de Código Afectadas
-          \`${{ steps.analyze.outputs.areas }}\`
-
-          ### 🔧 Pasos Sugeridos para Solución
-          ${{ steps.analyze.outputs.pasos }}
-
-          ---
-          *Análisis generado automáticamente por Claude*"
-
-          gh issue comment ${{ github.event.issue.number }} --body "$COMMENT" --repo ${{ github.repository }}
+            Be concise, helpful, and friendly. Do not over-engineer the response.
